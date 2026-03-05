@@ -37,7 +37,516 @@ var doomhammerTxt = '<table><tr><td><b class="q5">Doomhammer</b><br /><!--bo-->B
 var doomhammerFake = 50685 // Trauma has matching 1 yellow socket
 var fixDoomhammer
 
-if (typeof $WH == "undefined") {
+// Hard switch for testing: disable legacy EvoWoW/Wowhead runtime and use only local CSV tooltips.
+var __WOTLK_FORCE_LOCAL_TOOLTIPS = true;
+
+// Local tooltip fallback:
+// If remote Wowhead/Evowow resources fail (CORS/CORP/challenge), load tooltip HTML from
+// same-origin static CSV files that are already shipped in assets/db_inputs.
+(function scheduleLocalTooltipFallback() {
+    var installAttempts = 0;
+
+    function hasLegacyTooltipRuntime() {
+        return !!(
+            window.$WH &&
+            typeof window.$WH.g_ajaxIshRequest === "function" &&
+            window.$WH.Tooltip
+        );
+    }
+
+    function installLocalTooltipRuntime() {
+        if (window.__wotlkLocalTooltipsInstalled) {
+            return;
+        }
+        window.__wotlkLocalTooltipsInstalled = true;
+
+        var REPO_NAME = "wotlk";
+        var pathParts = window.location.pathname.split("/");
+        var repoIdx = pathParts.indexOf(REPO_NAME);
+        var repoBase = repoIdx === -1 ? "" : "/" + REPO_NAME;
+        var itemCsvUrl = repoBase + "/assets/db_inputs/wowhead_item_tooltips.csv";
+        var spellCsvUrl = repoBase + "/assets/db_inputs/wowhead_spell_tooltips.csv";
+        var wowheadIconBaseUrl = "https://wow.zamimg.com/images/wow/icons/large/";
+
+        var socketIconUrls = {
+            "socket-red": "https://wow.zamimg.com/images/icons/socket-red.gif",
+            "socket-yellow": "https://wow.zamimg.com/images/icons/socket-yellow.gif",
+            "socket-blue": "https://wow.zamimg.com/images/icons/socket-blue.gif",
+            "socket-meta": "https://wow.zamimg.com/images/icons/socket-meta.gif",
+            "socket-prismatic": "https://wow.zamimg.com/images/icons/socket-prismatic.gif",
+        };
+
+        var legendaryItemTooltipOverrides = {
+            130031: { tooltip: sunluteTxt, icon: "inv_weapon_bow_18" },
+            131001: { tooltip: warglaiveATxt, icon: "inv_weapon_glave_01" },
+            131002: { tooltip: warglaiveBTxt, icon: "inv_weapon_glave_01" },
+            132001: { tooltip: sulfurasTxt, icon: "inv_hammer_unique_sulfuras" },
+            132003: { tooltip: thunderfuryTxt, icon: "inv_sword_39" },
+            132004: { tooltip: scytheTxt, icon: "inv_staff_2h_artifactelune_d_04" },
+            132005: { tooltip: atieshPriestMageTxt, icon: "inv_staff_medivh" },
+            132006: { tooltip: atieshDruidTxt, icon: "inv_staff_medivh" },
+            132007: { tooltip: atieshPriestMageTxt, icon: "inv_staff_medivh" },
+            132008: { tooltip: atieshPriest258Txt, icon: "inv_staff_medivh" },
+            132009: { tooltip: nightwingTxt, icon: "inv_staff_107" },
+            132010: { tooltip: doomhammerTxt, icon: "inv_mace_17" },
+        };
+
+        var itemMapPromise = null;
+        var spellMapPromise = null;
+        var activeAnchor = null;
+        var activeRequestId = 0;
+        var cursorX = 0;
+        var cursorY = 0;
+
+        var tooltipEl = document.createElement("div");
+        tooltipEl.className = "wotlk-local-tooltip";
+        tooltipEl.style.display = "none";
+
+        var styleEl = document.createElement("style");
+        styleEl.textContent =
+            ".wotlk-local-tooltip{position:fixed;z-index:2147483000;max-width:560px;font-size:13px;line-height:1.35;pointer-events:none}" +
+            ".wotlk-local-tooltip-frame{position:relative;background:#111;color:#ddd;border:1px solid #3a3a3a;border-radius:6px;box-shadow:0 10px 28px rgba(0,0,0,.55);padding:9px}" +
+            ".wotlk-local-tooltip-frame.has-icon{margin-left:24px;padding-left:9px}" +
+            ".wotlk-local-tooltip-scroll{max-height:70vh;overflow:auto}" +
+            ".wotlk-local-tooltip-icon{position:absolute;left:-44px;top:0;width:40px;height:40px;border:1px solid #666;border-radius:3px;background:#080808;box-shadow:0 6px 12px rgba(0,0,0,.45)}" +
+            ".wotlk-local-tooltip table{width:100% !important;max-width:100%;border-collapse:collapse}" +
+            ".wotlk-local-tooltip td,.wotlk-local-tooltip th{font-size:13px !important;line-height:1.35 !important;vertical-align:top;padding:0}" +
+            ".wotlk-local-tooltip th{text-align:right !important;white-space:nowrap}" +
+            ".wotlk-local-tooltip small{font-size:11px !important}" +
+            ".wotlk-local-tooltip .q0{color:#fff}" +
+            ".wotlk-local-tooltip .q1{color:#fff}" +
+            ".wotlk-local-tooltip .q2{color:#1eff00}" +
+            ".wotlk-local-tooltip .q3{color:#0070dd}" +
+            ".wotlk-local-tooltip .q4{color:#a335ee}" +
+            ".wotlk-local-tooltip .q5{color:#ff8000}" +
+            ".wotlk-local-tooltip .q8{color:#ffd100}" +
+            ".wotlk-local-tooltip .wotlk-set-piece-missing,.wotlk-local-tooltip .wotlk-set-piece-missing a{color:#7f7f7f !important}" +
+            ".wotlk-local-tooltip .wotlk-set-bonus-active,.wotlk-local-tooltip .wotlk-set-bonus-active a{color:#1eff00 !important}" +
+            ".wotlk-local-tooltip .wotlk-set-bonus-missing,.wotlk-local-tooltip .wotlk-set-bonus-missing a{color:#7f7f7f !important}" +
+            ".wotlk-local-tooltip a{color:#9ecbff !important;text-decoration:none}" +
+            ".wotlk-local-tooltip a[class*='socket-']{display:inline-flex;align-items:center;min-height:14px;padding-left:18px;background-repeat:no-repeat;background-size:14px 14px;background-position:left center}" +
+            ".wotlk-local-tooltip a.socket-red{background-image:url('https://wow.zamimg.com/images/icons/socket-red.gif')}" +
+            ".wotlk-local-tooltip a.socket-yellow{background-image:url('https://wow.zamimg.com/images/icons/socket-yellow.gif')}" +
+            ".wotlk-local-tooltip a.socket-blue{background-image:url('https://wow.zamimg.com/images/icons/socket-blue.gif')}" +
+            ".wotlk-local-tooltip a.socket-meta{background-image:url('https://wow.zamimg.com/images/icons/socket-meta.gif')}" +
+            ".wotlk-local-tooltip a.socket-prismatic{background-image:url('https://wow.zamimg.com/images/icons/socket-prismatic.gif')}" +
+            ".wotlk-local-tooltip .moneygold,.wotlk-local-tooltip .moneysilver,.wotlk-local-tooltip .moneycopper{display:inline-flex;align-items:center;gap:2px;margin-right:4px}" +
+            ".wotlk-local-tooltip .moneygold::after,.wotlk-local-tooltip .moneysilver::after,.wotlk-local-tooltip .moneycopper::after{content:'';display:inline-block;width:13px;height:13px;background-position:center;background-repeat:no-repeat;background-size:13px 13px}" +
+            ".wotlk-local-tooltip .moneygold::after{background-image:url('https://wow.zamimg.com/images/icons/money-gold.gif')}" +
+            ".wotlk-local-tooltip .moneysilver::after{background-image:url('https://wow.zamimg.com/images/icons/money-silver.gif')}" +
+            ".wotlk-local-tooltip .moneycopper::after{background-image:url('https://wow.zamimg.com/images/icons/money-copper.gif')}";
+        document.head.appendChild(styleEl);
+        document.body.appendChild(tooltipEl);
+
+        function parseCsvMap(csvText) {
+            var map = {};
+            var start = 0;
+
+            while (start < csvText.length) {
+                var end = csvText.indexOf("\n", start);
+                if (end === -1) {
+                    end = csvText.length;
+                }
+
+                var line = csvText.slice(start, end).trim();
+                start = end + 1;
+
+                if (!line) {
+                    continue;
+                }
+
+                var commaIdx = line.indexOf(",");
+                if (commaIdx <= 0) {
+                    continue;
+                }
+
+                var id = parseInt(line.slice(0, commaIdx), 10);
+                if (!id) {
+                    continue;
+                }
+
+                try {
+                    map[id] = JSON.parse(line.slice(commaIdx + 1));
+                } catch (_err) {
+                    // Skip malformed lines.
+                }
+            }
+
+            return map;
+        }
+
+        function loadCsvMap(url) {
+            return fetch(url).then(function (response) {
+                if (!response.ok) {
+                    throw new Error("Failed to load tooltip CSV: " + url);
+                }
+                return response.text();
+            }).then(function (csvText) {
+                return parseCsvMap(csvText);
+            });
+        }
+
+        function getItemMap() {
+            if (!itemMapPromise) {
+                itemMapPromise = loadCsvMap(itemCsvUrl);
+            }
+            return itemMapPromise;
+        }
+
+        function getSpellMap() {
+            if (!spellMapPromise) {
+                spellMapPromise = loadCsvMap(spellCsvUrl);
+            }
+            return spellMapPromise;
+        }
+
+        function extractTargetFromString(value) {
+            if (!value) {
+                return null;
+            }
+
+            var match = value.match(/(?:[?&#/]|^)(item|spell)=(-?\d+)(?=$|[&#/?])/i);
+            if (!match) {
+                match = value.match(/(?:^|[,\s])(item|spell)[:=](-?\d+)/i);
+            }
+
+            if (!match) {
+                return null;
+            }
+
+            var id = parseInt(match[2], 10);
+            if (!id) {
+                return null;
+            }
+
+            return {
+                type: match[1].toLowerCase(),
+                id: id,
+            };
+        }
+
+        function parseTooltipParamsFromString(value) {
+            var params = {};
+
+            if (!value) {
+                return params;
+            }
+
+            value.replace(/\b([a-z]+)=([a-z0-9:-]+)/ig, function (_fullMatch, rawKey, rawValue) {
+                var key = rawKey.toLowerCase();
+
+                if (key === "pcs") {
+                    var pcs = rawValue.split(":").map(function (idStr) {
+                        return parseInt(idStr, 10);
+                    }).filter(function (id) {
+                        return !!id;
+                    });
+
+                    if (pcs.length > 0) {
+                        params.pcs = pcs;
+                    }
+                }
+
+                return "";
+            });
+
+            return params;
+        }
+
+        function getAnchorTarget(anchor) {
+            if (!anchor) {
+                return null;
+            }
+
+            var datasetValue = null;
+            if (anchor.dataset && Object.prototype.hasOwnProperty.call(anchor.dataset, "wowhead")) {
+                datasetValue = anchor.dataset.wowhead;
+            } else if (anchor.getAttribute) {
+                datasetValue = anchor.getAttribute("data-wowhead");
+            }
+
+            var relValue = anchor.getAttribute("rel");
+            var hrefValue = anchor.getAttribute("href");
+
+            var target =
+                extractTargetFromString(datasetValue) ||
+                extractTargetFromString(relValue) ||
+                extractTargetFromString(hrefValue);
+
+            if (!target) {
+                return null;
+            }
+
+            var params = {};
+            var datasetParams = parseTooltipParamsFromString(datasetValue);
+            var relParams = parseTooltipParamsFromString(relValue);
+            var hrefParams = parseTooltipParamsFromString(hrefValue);
+
+            if (datasetParams.pcs && datasetParams.pcs.length > 0) {
+                params.pcs = datasetParams.pcs;
+            } else if (relParams.pcs && relParams.pcs.length > 0) {
+                params.pcs = relParams.pcs;
+            } else if (hrefParams.pcs && hrefParams.pcs.length > 0) {
+                params.pcs = hrefParams.pcs;
+            }
+
+            target.params = params;
+            return target;
+        }
+
+        function sanitizeLegacyTooltipHtml(html) {
+            return html.replace(/_[A-Z0-9]+_/g, "");
+        }
+
+        function ensureSocketIcons(html) {
+            for (var cssClass in socketIconUrls) {
+                if (!Object.prototype.hasOwnProperty.call(socketIconUrls, cssClass)) {
+                    continue;
+                }
+                var socketRegex = new RegExp('class="([^"]*\\b' + cssClass + '\\b[^"]*)"', "gi");
+                html = html.replace(socketRegex, function (_match, classList) {
+                    if (/\bsocket-local-icon\b/.test(classList)) {
+                        return 'class="' + classList + '"';
+                    }
+                    return 'class="' + classList + ' socket-local-icon"';
+                });
+            }
+
+            return html;
+        }
+
+        function buildTooltipMarkup(html, icon) {
+            if (!html) {
+                return "";
+            }
+
+            html = ensureSocketIcons(html);
+
+            var iconHtml = "";
+            if (icon) {
+                iconHtml =
+                    '<img class="wotlk-local-tooltip-icon" src="' +
+                    wowheadIconBaseUrl + icon.toLowerCase() + '.jpg" alt="">';
+            }
+
+            return (
+                '<div class="wotlk-local-tooltip-frame' + (icon ? " has-icon" : "") + '">' +
+                    iconHtml +
+                    '<div class="wotlk-local-tooltip-scroll">' +
+                        html +
+                    '</div>' +
+                '</div>'
+            );
+        }
+
+        function applyLocalSetPieceCount(html, params) {
+            if (!html || !params || !params.pcs || !params.pcs.length) {
+                return html;
+            }
+
+            var equippedCount = 0;
+            var setPieceAliases = {
+                131001: [131001, 32837],
+                131002: [131002, 32838],
+                32837: [32837, 131001],
+                32838: [32838, 131002],
+            };
+            var equippedSetPieceIds = {};
+
+            for (var i = 0; i < params.pcs.length; ++i) {
+                var setItemId = parseInt(params.pcs[i], 10);
+                if (!setItemId) {
+                    continue;
+                }
+
+                var candidateIds = setPieceAliases[setItemId] || [setItemId];
+                for (var c = 0; c < candidateIds.length; ++c) {
+                    equippedSetPieceIds[candidateIds[c]] = true;
+                }
+            }
+
+            html = html.replace(/<span(?: class="[^"]*")?>(<!--si([0-9:]+)--><a href="[^"]*item=([0-9]+)[^"]*">(.+?)<\/a>)<\/span>/g, function (_fullMatch, innerHtml, _siToken, itemIdStr) {
+                var tooltipSetItemId = parseInt(itemIdStr, 10);
+                if (equippedSetPieceIds[tooltipSetItemId]) {
+                    ++equippedCount;
+                    return '<span class="q8">' + innerHtml + '</span>';
+                }
+
+                return '<span class="wotlk-set-piece-missing">' + innerHtml + '</span>';
+            });
+
+            if (equippedCount > 0) {
+                html = html.replace(/\(0\/([0-9]+)\)/, "(" + equippedCount + "/$1)");
+                html = html.replace(/<span>\(([0-9]+)\)/g, function (fullMatch, countStr) {
+                    return parseInt(countStr, 10) <= equippedCount ? '<span class="q2">(' + countStr + ')' : fullMatch;
+                });
+            }
+
+            html = html.replace(/<span>(\(([0-9]+)\)\s*Set\s*:[\s\S]*?)<\/span>/g, function (_fullMatch, innerHtml, requiredCountStr) {
+                var requiredCount = parseInt(requiredCountStr, 10);
+                var bonusClass = requiredCount <= equippedCount ? "wotlk-set-bonus-active" : "wotlk-set-bonus-missing";
+                return '<span class="' + bonusClass + '">' + innerHtml + "</span>";
+            });
+
+            return html;
+        }
+
+        function getTooltipData(type, id, params) {
+            if (type === "item") {
+                return getItemMap().then(function (map) {
+                    var entry = map[id];
+                    var override = legendaryItemTooltipOverrides[id];
+                    var html = "";
+                    var icon = "";
+
+                    if (!entry && override) {
+                        html = sanitizeLegacyTooltipHtml(override.tooltip || "");
+                        icon = override.icon || "";
+                    } else {
+                        html = entry ? (entry.tooltip || "") : "";
+                        icon = entry ? (entry.icon || "") : (override ? override.icon : "");
+                    }
+
+                    return {
+                        html: applyLocalSetPieceCount(html, params),
+                        icon: icon,
+                    };
+                });
+            }
+            if (type === "spell") {
+                return getSpellMap().then(function (map) {
+                    var entry = map[id];
+                    if (!entry) {
+                        return { html: "", icon: "" };
+                    }
+                    return {
+                        html: entry.tooltip || entry.buff || "",
+                        icon: entry.icon || "",
+                    };
+                });
+            }
+            return Promise.resolve({ html: "", icon: "" });
+        }
+
+        function positionTooltip() {
+            if (tooltipEl.style.display === "none") {
+                return;
+            }
+
+            var padX = 32;
+            var padY = 6;
+            var left = cursorX + padX;
+            var top = cursorY + padY;
+            var rect = tooltipEl.getBoundingClientRect();
+
+            if (left + rect.width > window.innerWidth - 8) {
+                left = Math.max(8, cursorX - rect.width - padX);
+            }
+            if (top + rect.height > window.innerHeight - 8) {
+                top = Math.max(8, cursorY - rect.height - padY);
+            }
+
+            tooltipEl.style.left = left + "px";
+            tooltipEl.style.top = top + "px";
+        }
+
+        function hideTooltip() {
+            tooltipEl.style.display = "none";
+            tooltipEl.innerHTML = "";
+        }
+
+        function showTooltip(tooltipData) {
+            if (!tooltipData || !tooltipData.html) {
+                hideTooltip();
+                return;
+            }
+            tooltipEl.innerHTML = buildTooltipMarkup(tooltipData.html, tooltipData.icon);
+            tooltipEl.style.display = "block";
+            positionTooltip();
+        }
+
+        function findAnchor(node) {
+            while (node) {
+                if (node.tagName === "A" || node.tagName === "AREA") {
+                    return node;
+                }
+                node = node.parentNode;
+            }
+            return null;
+        }
+
+        function isInsideAnchor(node, anchor) {
+            return !!(node && anchor && (node === anchor || anchor.contains(node)));
+        }
+
+        document.addEventListener("mousemove", function (event) {
+            cursorX = event.clientX;
+            cursorY = event.clientY;
+            positionTooltip();
+        }, true);
+
+        document.addEventListener("mouseover", function (event) {
+            var anchor = findAnchor(event.target);
+            var target = getAnchorTarget(anchor);
+
+            if (!target) {
+                return;
+            }
+
+            activeAnchor = anchor;
+            activeRequestId += 1;
+            var requestId = activeRequestId;
+
+            getTooltipData(target.type, target.id, target.params).then(function (tooltipData) {
+                if (requestId !== activeRequestId || activeAnchor !== anchor) {
+                    return;
+                }
+                showTooltip(tooltipData);
+            }).catch(function () {
+                if (requestId === activeRequestId) {
+                    hideTooltip();
+                }
+            });
+        }, true);
+
+        document.addEventListener("mouseout", function (event) {
+            if (!activeAnchor) {
+                return;
+            }
+
+            var fromActiveAnchor = isInsideAnchor(event.target, activeAnchor);
+            var toActiveAnchor = isInsideAnchor(event.relatedTarget, activeAnchor);
+
+            if (fromActiveAnchor && !toActiveAnchor) {
+                activeAnchor = null;
+                hideTooltip();
+            }
+        }, true);
+    }
+
+    function maybeInstallFallback() {
+        if (__WOTLK_FORCE_LOCAL_TOOLTIPS) {
+            installLocalTooltipRuntime();
+            return;
+        }
+
+        if (hasLegacyTooltipRuntime()) {
+            return;
+        }
+
+        installAttempts += 1;
+        if (installAttempts < 6) {
+            setTimeout(maybeInstallFallback, 200);
+            return;
+        }
+
+        installLocalTooltipRuntime();
+    }
+
+    setTimeout(maybeInstallFallback, 200);
+})();
+
+if (!__WOTLK_FORCE_LOCAL_TOOLTIPS && typeof $WH == "undefined") {
     $WH = { wowheadRemote: true };
 
     /* custom */
@@ -45,7 +554,7 @@ if (typeof $WH == "undefined") {
     var g_staticUrl = 'https://wotlk.evowow.com/static';
 }
 
-if (typeof $WowheadPower == "undefined") {
+if (!__WOTLK_FORCE_LOCAL_TOOLTIPS && typeof $WowheadPower == "undefined") {
     var $WowheadPower = new function () {
         var isRemote = $WH.wowheadRemote;
         var
